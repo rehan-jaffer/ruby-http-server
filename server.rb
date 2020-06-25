@@ -1,3 +1,4 @@
+require 'date'
 require 'pp'
 require 'socket'
 
@@ -38,6 +39,10 @@ module HttpServer
       puts "* New connection from #{client.addr[2]}"
     end
 
+    def log(request, response)
+      puts "[#{DateTime.now()}] - #{request.type} #{request.uri} - #{response.response_code}"
+    end
+
     def print(msg)
       puts msg
     end
@@ -47,11 +52,13 @@ module HttpServer
 
     attr_accessor :response_code, :headers, :content
 
-    def initialize
+    def initialize(response_code:, content:)
+      @response_code = response_code
+      @content = content
     end
 
     def to_s
-      "HTTP/1.1 200 OK\r\n\r\n#{@content}"
+      "HTTP/1.0 200 OK\r\n\r\n#{@content}"
     end
 
   end
@@ -79,9 +86,14 @@ module HttpServer
 
     def get(request)
       file = File.read("public" + request.uri).to_s
-      @client.puts("HTTP/1.1 200 OK\r\n")
-      @client.puts("\r\n")
-      @client.puts(file)
+      response = Response.new(response_code: 200, content: file)
+      @outputter.log(request, response)
+      @client.puts(response.to_s)
+      @client.close
+    rescue Errno::ENOENT => e
+      response = Response.new(response_code: 404, content: "")
+      @outputter.log(request, response)
+      @client.puts(response.to_s)
       @client.close
     end
 
