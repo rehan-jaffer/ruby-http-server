@@ -1,8 +1,18 @@
 require 'date'
 require 'pp'
 require 'socket'
+require './plugins'
 
 module HttpServer
+
+  class PluginLoader
+    attr_accessor :request, :response
+
+    def initialize
+      @request = [HTTPServer::Plugins::Index]
+      @response = []
+    end
+  end
 
   class Server
 
@@ -10,6 +20,7 @@ module HttpServer
       @host = host
       @port = port
       @outputter = outputter
+      @plugins = PluginLoader.new
     end
 
     def start!
@@ -20,7 +31,7 @@ module HttpServer
       loop do
         Thread.start(@server.accept) do |client|
           @outputter.new_connection(client)
-          HttpServer::Request.new(client, @outputter).handle
+          HttpServer::Request.new(client, @outputter, @plugins).handle
         end
       end
     rescue Errno::EACCES => e
@@ -57,16 +68,49 @@ module HttpServer
       @content = content
     end
 
+    def code_text(number)
+      {
+        200 => "OK",
+        404 => "Not Found"
+       }[number]
+    rescue StandardError => e
+      "Unknown"
+    end
+
     def to_s
-      "HTTP/1.0 200 OK\r\n\r\n#{@content}"
+      "HTTP/1.0 #{@response_code} #{code_text(@response_code)}\r\n\r\n#{@content}"
     end
 
   end
 
-  class Request
-    def initialize(client, outputter)
+  class GetRequest
+
+    def initialize(request:, client:, outputter:)
+      @request = request
       @client = client
       @outputter = outputter
+    end
+
+    def handle
+      file = File.read("public" + @request.uri).to_s
+      response = Response.new(response_code: 200, content: file)
+      @outputter.log(@request, response)
+      @client.puts(response.to_s)
+      @client.close
+    rescue Errno::ENOENT => e
+      response = Response.new(response_code: 404, content: "")
+      @outputter.log(@request, response)
+      @client.puts(response.to_s)
+      @client.close
+    end
+  end
+
+  class Request
+
+    def initialize(client, outputter, plugins)
+      @client = client
+      @outputter = outputter
+      @plugins = plugins
     end
 
     def get_request
@@ -79,39 +123,29 @@ module HttpServer
     end
 
    def parse_request(raw_request)
-     req = HTTPRequest.new(raw_request)
-     req.parse!
-     req
+     HTTPRequestParser.new(raw_request).parse!
    end
-
-    def get(request)
-      file = File.read("public" + request.uri).to_s
-      response = Response.new(response_code: 200, content: file)
-      @outputter.log(request, response)
-      @client.puts(response.to_s)
-      @client.close
-    rescue Errno::ENOENT => e
-      response = Response.new(response_code: 404, content: "")
-      @outputter.log(request, response)
-      @client.puts(response.to_s)
-      @client.close
-    end
 
     def handle
       raw_request = get_request
       parsed_request = parse_request(raw_request)
+
+      final_request = @plugins.request.reduce(parsed_request) do |transformed_request, plugin|
+        transformed_request = plugin.exec(transformed_request)
+      end
+
       case parsed_request.type
         when "GET"
-          get(parsed_request)
+          GetRequest.new(request: final_request, client: @client, outputter: @outputter).handle
         else
           raise UnsupportedRequestType, "#{parsed_request.type} is not yet supported"
       end
     end
   end
 
-  class HTTPRequest
+  HTTPRequest = Struct.new(:headers, :uri, :type)
 
-    attr_reader :headers, :uri, :type
+  class HTTPRequestParser
 
     def initialize(raw_request)
       @raw_request = raw_request
@@ -120,6 +154,7 @@ module HttpServer
     def parse!
       parse_request_line
       parse_headers
+      HTTPRequest.new(@headers, @uri, @type)
     end
 
     def parse_request_line
